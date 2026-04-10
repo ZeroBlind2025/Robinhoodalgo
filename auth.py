@@ -38,6 +38,16 @@ log = get_logger("auth")
 
 SESSION_ENV = "RH_SESSION_PICKLE_B64"
 
+# Module-level cache of the last successful login response. rh.login()
+# in robin_stocks 3.4.0 returns a dict with access_token, refresh_token,
+# token_type, expires_in etc. on success. We capture it here so that
+# _try_manual_pickle_save() can serialize a pickle even if robin_stocks
+# skipped the store_session write (which it does on some challenge
+# flows). This is the only reliable source of the refresh_token, which
+# is what keeps sessions alive across container restarts.
+_last_login_result: Dict[str, Any] = {}
+_last_device_token: str = ""
+
 
 def _robin_stocks():
     # Imported lazily so paper mode and unit tests can run without the lib.
@@ -46,8 +56,15 @@ def _robin_stocks():
 
 
 def _pickle_path() -> Path:
-    """Where robin_stocks expects the session pickle to live."""
-    return Path.home() / ".tokens" / f"{config.PICKLE_NAME}.pickle"
+    """
+    Where robin_stocks expects the session pickle to live.
+
+    Important: robin_stocks 3.4.0 builds the filename as
+    ``"robinhood" + pickle_name + ".pickle"`` — note the "robinhood"
+    prefix. We have to match that exactly, otherwise rh.login() won't
+    find the pickle we restore from RH_SESSION_PICKLE_B64 on boot.
+    """
+    return Path.home() / ".tokens" / f"robinhood{config.PICKLE_NAME}.pickle"
 
 
 def _find_pickle() -> Optional[Path]:
@@ -100,60 +117,59 @@ def _find_pickle() -> Optional[Path]:
 
 def _try_manual_pickle_save() -> Optional[Path]:
     """
-    Fallback: if robin_stocks didn't write the pickle to disk after a
-    successful login, pull the session state out of its module globals
-    and write our own pickle. The resulting file has the same shape as
-    the one robin_stocks normally writes, so _restore_pickle_from_env()
-    can feed it back on next boot.
+    Fallback: build a pickle from the captured rh.login() return value
+    (_last_login_result) plus the captured device_token. This is the
+    only reliable source of refresh_token on robin_stocks 3.4.0's
+    push-notification flow, since the library doesn't expose it as a
+    module global.
+
+    Writes to the same path (~/.tokens/<name>.pickle) that
+    robin_stocks itself would use, so _restore_pickle_from_env() can
+    feed it back on the next boot transparently.
     """
+    if not _last_login_result or not _last_login_result.get("access_token"):
+        log.warning(
+            "No cached rh.login() result to pickle. "
+            "Either login hasn't completed yet, or it failed."
+        )
+        return None
+
+    device_token = _last_device_token
+    if not device_token:
+        # Fall back to asking robin_stocks for one. Not ideal — this
+        # generates a FRESH device token that doesn't match the one
+        # we logged in with — but it's all we have.
+        try:
+            from robin_stocks.robinhood.authentication import generate_device_token  # type: ignore
+            device_token = generate_device_token()
+        except Exception:  # noqa: BLE001
+            device_token = ""
+
+    payload = {
+        "token_type": _last_login_result.get("token_type", "Bearer"),
+        "access_token": _last_login_result["access_token"],
+        "refresh_token": _last_login_result.get("refresh_token", ""),
+        "device_token": device_token,
+        "expires_in": _last_login_result.get("expires_in", 86400),
+    }
+
     try:
-        rh = _robin_stocks()
-        from robin_stocks.robinhood import helper as rh_helper  # type: ignore
-
-        session = getattr(rh_helper, "SESSION", None)
-        if session is None:
-            log.warning("robin_stocks helper.SESSION not available; cannot manual-pickle")
-            return None
-
-        # Pull OAuth state from the module. Different robin_stocks
-        # versions keep these in slightly different places; try a few.
-        candidates = [
-            rh_helper,
-            getattr(rh, "authentication", None),
-        ]
-        token_data: Dict[str, Any] = {}
-        for mod in candidates:
-            if mod is None:
-                continue
-            for key in ("access_token", "refresh_token", "device_token",
-                        "token_type", "expires_in"):
-                val = getattr(mod, key, None)
-                if val and key not in token_data:
-                    token_data[key] = val
-
-        if not token_data.get("access_token"):
-            log.warning("No access_token in robin_stocks module state")
-            return None
-
-        # Reconstruct the pickle payload robin_stocks normally writes.
-        payload = {
-            "token_type": token_data.get("token_type", "Bearer"),
-            "access_token": token_data.get("access_token"),
-            "refresh_token": token_data.get("refresh_token", ""),
-            "device_token": token_data.get("device_token", ""),
-            "expires_in": token_data.get("expires_in", 86400),
-            "headers": dict(session.headers) if hasattr(session, "headers") else {},
-        }
-
         path = _pickle_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         import pickle
         with open(path, "wb") as f:
             pickle.dump(payload, f)
-        log.info("Manually wrote session pickle to %s", path)
+        log.info(
+            "Manually wrote session pickle to %s "
+            "(access_token=%s, refresh_token=%s, device_token=%s)",
+            path,
+            "yes" if payload["access_token"] else "no",
+            "yes" if payload["refresh_token"] else "no",
+            "yes" if payload["device_token"] else "no",
+        )
         return path
     except Exception as exc:  # noqa: BLE001
-        log.warning("Manual pickle save failed: %s", exc)
+        log.warning("Manual pickle save write failed: %s", exc)
         return None
 
 
@@ -169,8 +185,13 @@ def debug_token_state() -> Dict[str, Any]:
         "tokens_dir_exists": (Path.home() / ".tokens").exists(),
         "tokens_dir_contents": [],
         "found_pickles": [],
-        "rh_module_state": {},
+        "last_login_result": {},
+        "session_state": {},
+        "module_attrs": {},
+        "auth_probe": {},
     }
+
+    # Filesystem scan
     tokens_dir = Path.home() / ".tokens"
     if tokens_dir.exists():
         try:
@@ -183,30 +204,107 @@ def debug_token_state() -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             info["tokens_dir_contents"] = f"error: {exc}"
 
+    seen_paths = set()
     for d in (Path.home() / ".tokens", Path.home(), Path.cwd()):
         if not d.exists():
             continue
         try:
             for f in d.rglob("*.pickle"):
-                if f.is_file():
-                    info["found_pickles"].append({
-                        "path": str(f),
-                        "size": f.stat().st_size,
-                        "mtime": f.stat().st_mtime,
-                    })
+                if not f.is_file():
+                    continue
+                try:
+                    resolved = str(f.resolve())
+                except Exception:  # noqa: BLE001
+                    resolved = str(f)
+                if resolved in seen_paths:
+                    continue
+                seen_paths.add(resolved)
+                info["found_pickles"].append({
+                    "path": resolved,
+                    "size": f.stat().st_size,
+                    "mtime": f.stat().st_mtime,
+                })
         except Exception:  # noqa: BLE001
             continue
 
-    # Probe robin_stocks module state (non-sensitive keys only).
+    # Our captured login result (safe summary — just which keys are present)
+    info["last_login_result"] = {
+        "populated": bool(_last_login_result),
+        "keys": list(_last_login_result.keys()) if _last_login_result else [],
+        "has_access_token": bool(_last_login_result.get("access_token")),
+        "has_refresh_token": bool(_last_login_result.get("refresh_token")),
+        "has_device_token_captured": bool(_last_device_token),
+        "token_type": _last_login_result.get("token_type", ""),
+        "expires_in": _last_login_result.get("expires_in"),
+    }
+
+    # robin_stocks session state
     try:
         from robin_stocks.robinhood import helper as rh_helper  # type: ignore
-        info["rh_module_state"] = {
-            "has_session": hasattr(rh_helper, "SESSION"),
-            "has_access_token": bool(getattr(rh_helper, "access_token", None)),
-            "has_refresh_token": bool(getattr(rh_helper, "refresh_token", None)),
+        session = getattr(rh_helper, "SESSION", None)
+        if session is not None:
+            headers = dict(session.headers) if hasattr(session, "headers") else {}
+            auth_h = headers.get("Authorization", "") or headers.get("authorization", "")
+            info["session_state"] = {
+                "exists": True,
+                "has_auth_header": bool(auth_h),
+                "auth_header_preview": (
+                    auth_h[:15] + "..." if len(auth_h) > 15 else auth_h
+                ),
+                "header_keys": list(headers.keys()),
+                "cookie_count": len(session.cookies) if hasattr(session, "cookies") else 0,
+            }
+        else:
+            info["session_state"] = {"exists": False}
+
+        # Dump non-callable module attrs — redacted for anything
+        # containing "token" or "secret".
+        for mod_name in ("helper", "authentication"):
+            try:
+                mod = __import__(
+                    f"robin_stocks.robinhood.{mod_name}",
+                    fromlist=[mod_name],
+                )
+            except Exception as exc:  # noqa: BLE001
+                info["module_attrs"][mod_name] = {"import_error": str(exc)}
+                continue
+            attrs: Dict[str, Any] = {}
+            for name in dir(mod):
+                if name.startswith("_"):
+                    continue
+                try:
+                    val = getattr(mod, name, None)
+                except Exception:  # noqa: BLE001
+                    continue
+                if callable(val):
+                    continue
+                if isinstance(val, (str, bool, int, float, type(None))):
+                    sensitive = any(
+                        s in name.lower()
+                        for s in ("token", "secret", "password", "pwd")
+                    )
+                    if sensitive:
+                        attrs[name] = {
+                            "type": type(val).__name__,
+                            "truthy": bool(val),
+                            "length": len(val) if isinstance(val, str) else None,
+                        }
+                    else:
+                        attrs[name] = str(val)[:60]
+            info["module_attrs"][mod_name] = attrs
+    except ImportError as exc:
+        info["session_state"] = {"import_error": str(exc)}
+
+    # Live probe: try an authenticated call and see what comes back.
+    try:
+        import robin_stocks.robinhood as rh  # type: ignore
+        profile = rh.profiles.load_portfolio_profile()
+        info["auth_probe"] = {
+            "profile_loaded": bool(profile),
+            "has_equity": bool(profile and profile.get("equity")),
         }
     except Exception as exc:  # noqa: BLE001
-        info["rh_module_state"] = {"error": str(exc)}
+        info["auth_probe"] = {"error": str(exc)[:120]}
 
     return info
 
@@ -280,14 +378,41 @@ def _try_pickle_login() -> bool:
     """
     Let robin_stocks load the pickled session. If the refresh token
     inside is still valid this succeeds without any MFA prompt.
+
+    IMPORTANT: we capture the return value of rh.login() into
+    _last_login_result so _try_manual_pickle_save() has access to the
+    full token payload (including refresh_token) regardless of whether
+    robin_stocks actually wrote the pickle to disk. On push-notification
+    challenge flows we've observed robin_stocks silently skip the
+    store_session step, so capturing the return value is our only
+    reliable source of truth.
     """
+    global _last_login_result, _last_device_token
     try:
-        _robin_stocks().login(
+        # Intercept device_token generation so we can persist the same
+        # one into our manual pickle (robin_stocks generates a fresh
+        # one on every login() call if one isn't passed in).
+        try:
+            from robin_stocks.robinhood import authentication as rh_auth  # type: ignore
+            orig_gen = getattr(rh_auth, "generate_device_token", None)
+            if orig_gen is not None:
+                def _capture_device_token():
+                    global _last_device_token
+                    tok = orig_gen()
+                    _last_device_token = tok
+                    return tok
+                rh_auth.generate_device_token = _capture_device_token
+        except Exception:  # noqa: BLE001
+            pass
+
+        result = _robin_stocks().login(
             username=config.RH_USERNAME,
             password=config.RH_PASSWORD,
             store_session=True,
             pickle_name=config.PICKLE_NAME,
         )
+        if isinstance(result, dict):
+            _last_login_result = result
         return _session_valid()
     except Exception as exc:  # noqa: BLE001
         log.warning("Pickle-based login failed: %s", exc)
