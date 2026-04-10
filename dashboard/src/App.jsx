@@ -1,5 +1,5 @@
 /*
- * VWAP Scalper dashboard — wired to the Python engine's /status HTTP API.
+ * VWAP Scalper dashboard — wired to the Python engine's HTTP API.
  *
  * Polls the engine every 2 seconds for:
  *   GET /state      account value, day P/L, trade count, budget, flags
@@ -7,18 +7,24 @@
  *   GET /positions  open positions keyed by symbol
  *   GET /trades     in-memory trade memo for today
  *
- * Configuration (via Vite env vars, set in dashboard/.env or the host):
- *   VITE_API_URL    default "http://localhost:8000"
+ * Configuration (via Vite env vars):
+ *   VITE_API_URL    default "" = same-origin. Set to the engine's
+ *                   public URL if the dashboard is deployed separately.
  *   VITE_API_TOKEN  matches DASHBOARD_TOKEN on the engine, empty = no auth
  *
- * No simulation code. If the engine is down the dashboard shows the last
- * successful snapshot and a "stale" banner.
+ * When deployed inside the Python engine's FastAPI server (single
+ * Railway service), leave VITE_API_URL unset. The bundle will hit
+ * /state, /tickers, etc. on the current origin.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
 
 // ─── Config ───────────────────────────────────────────────────────────
-const API_URL = (import.meta.env && import.meta.env.VITE_API_URL) || "http://localhost:8000";
+// Default to "" (same-origin) so the dashboard works when served from
+// the Python FastAPI engine on the same host. Override VITE_API_URL at
+// build time for split deployments (engine on Railway, dashboard on
+// Vercel, etc).
+const API_URL = (import.meta.env && import.meta.env.VITE_API_URL) || "";
 const API_TOKEN = (import.meta.env && import.meta.env.VITE_API_TOKEN) || "";
 const POLL_MS = 2000;
 

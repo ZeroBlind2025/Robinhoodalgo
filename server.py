@@ -3,24 +3,37 @@ HTTP status server for the dashboard.
 
 A minimal FastAPI app that runs in a background thread alongside the
 main trading loop. It exposes read-only snapshots of the engine's
-state so a React dashboard (or any HTTP client) can poll without
-touching Robinhood directly.
+state and, if a built dashboard is present at `dashboard/dist/`,
+serves it as static files from the same origin — so one Railway
+service does everything with no CORS / Vercel needed.
 
-Endpoints (all JSON):
+API endpoints (all JSON):
   GET /health       — liveness check, no auth
   GET /state        — account value, P/L, trade count, flags
   GET /tickers      — per-ticker snapshots matching the dashboard shape
   GET /positions    — open positions keyed by symbol
   GET /trades       — in-memory trade memo for today
 
+Static hosting:
+  GET /             — dashboard/dist/index.html (if present)
+  GET /assets/...   — compiled JS/CSS chunks
+  The mount is conditional: if dashboard/dist doesn't exist the server
+  runs API-only. This lets you run the engine locally without ever
+  building the dashboard.
+
 Auth: set DASHBOARD_TOKEN in the environment and send it as
 `Authorization: Bearer <token>`. If DASHBOARD_TOKEN is empty, auth is
-disabled (useful for local testing).
+disabled (useful for local testing). Static files are always public —
+the dashboard ships with no secrets baked in, all state comes from the
+authenticated JSON endpoints.
 
-CORS: `*` by default. Set DASHBOARD_ORIGIN to lock it down.
+CORS: `*` by default. Set DASHBOARD_ORIGIN to lock it down. Not
+strictly needed when the dashboard is served from the same origin as
+the API, but kept in place for external API clients.
 """
 
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import config
@@ -174,6 +187,26 @@ def create_app(scalper):
     def trades(authorization: Optional[str] = Header(None)) -> List[Dict[str, Any]]:
         _check_auth(authorization)
         return scalper.recent_trades()
+
+    # ------------------------------------------------------------------
+    # Static dashboard mount (optional — only if the Vite build exists)
+    # ------------------------------------------------------------------
+    # Mounted AFTER all API routes so /state, /tickers etc take
+    # precedence. html=True makes StaticFiles serve index.html on "/".
+    dist_dir = Path(__file__).parent / "dashboard" / "dist"
+    if dist_dir.exists() and (dist_dir / "index.html").exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount(
+            "/",
+            StaticFiles(directory=str(dist_dir), html=True),
+            name="dashboard",
+        )
+        log.info("Serving dashboard from %s", dist_dir)
+    else:
+        log.info(
+            "dashboard/dist not found — running API-only "
+            "(dashboard will be built inside the Docker image)"
+        )
 
     return app
 
