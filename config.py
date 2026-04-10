@@ -86,6 +86,16 @@ MAX_DAILY_TRADES = _env_int("MAX_DAILY_TRADES", 20)
 MAX_CONCURRENT = _env_int("MAX_CONCURRENT", 2)
 MAX_SECTOR_EXPOSURE = _env_int("MAX_SECTOR_EXPOSURE", 2)
 
+# Minimum seconds to wait after closing a position on a ticker before
+# allowing a new entry on the same ticker. Prevents buy-stop-buy-stop
+# oscillation when price hugs a signal level.
+TICKER_COOLDOWN_SECONDS = _env_int("TICKER_COOLDOWN_SECONDS", 120)
+
+# Minimum seconds a momentum position must be held before the
+# volume_fade exit can fire. RVOL decays quickly after a spike — the
+# spec's "exit when RVOL<1" rule cuts trades too early without this.
+MOMENTUM_MIN_HOLD_SECONDS = _env_int("MOMENTUM_MIN_HOLD_SECONDS", 90)
+
 # Account type: "cash" or "margin". PDT (FINRA Rule 4210) only applies to
 # margin accounts — cash accounts can day trade freely, bounded only by
 # settled-cash availability (T+1). Set ACCOUNT_TYPE=cash to bypass the

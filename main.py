@@ -52,6 +52,10 @@ class Scalper:
         self.trades_memo: Deque[Dict] = deque(maxlen=200)
         self.win_count: int = 0
         self._last_account_value: float = 0.0
+        # Per-ticker cooldown: maps ticker symbol to the datetime of
+        # the most recent close. Used to block re-entries for
+        # TICKER_COOLDOWN_SECONDS.
+        self._last_close_time: Dict[str, datetime] = {}
 
     # ------------------------------------------------------------------
     # startup
@@ -278,6 +282,15 @@ class Scalper:
         account_value: float,
         now: datetime,
     ) -> None:
+        # Per-ticker cooldown: block re-entries for a couple of minutes
+        # after closing, so we don't buy-stop-buy-stop oscillate when
+        # price hugs a signal level.
+        last_close = self._last_close_time.get(ts_state.ticker)
+        if last_close is not None:
+            elapsed = (now - last_close).total_seconds()
+            if elapsed < config.TICKER_COOLDOWN_SECONDS:
+                return
+
         bars = ts_state.bars.snapshot()
         if len(bars) < 4:
             return
@@ -453,6 +466,7 @@ class Scalper:
             "reason": reason,
         })
         ts_state.position = None
+        self._last_close_time[ts_state.ticker] = now_exit
 
     def _flatten_all(self, quotes: Dict[str, Dict]) -> None:
         for ticker in list(self.state.tickers):

@@ -140,8 +140,21 @@ def check_vwap_reversion_exit(
     if price <= stop_price:
         return "stop_loss"
 
-    # Stop loss: extreme dislocation (thesis broken)
-    if vwap_engine.std_dev > 0 and price <= vwap_engine.lower_2:
+    # Stop loss: extreme dislocation (thesis broken).
+    #
+    # The spec calls this "price BREAKS BELOW lower 2σ" — meaning we
+    # entered above the band and price broke through. But VWAP reversion
+    # entries can fire right AT the lower_2 band, and without this
+    # guard the exit fires on the entry itself and we bleed P/L on
+    # buy-stop-buy-stop oscillation. Require the price to have moved
+    # at least half the regular stop distance below entry before the
+    # catastrophic band stop can trigger.
+    band_stop_tolerance = config.VWAP_STOP_PCT / 2.0  # default: 0.25%
+    if (
+        vwap_engine.std_dev > 0
+        and price <= vwap_engine.lower_2
+        and price <= entry_price * (1 - band_stop_tolerance)
+    ):
         return "stop_lower_2sigma"
 
     # Time stop

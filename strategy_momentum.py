@@ -126,6 +126,7 @@ def check_momentum_exit(
     ts: Optional[datetime] = None,
 ) -> Optional[str]:
     ts = ts or clock.now_et()
+    held_seconds = (ts - entry_time).total_seconds()
 
     # Take profit (fixed target)
     if price >= entry_price * (1 + config.MOMENTUM_TP_PCT):
@@ -147,12 +148,19 @@ def check_momentum_exit(
     if price <= entry_price * (1 - config.MOMENTUM_STOP_PCT):
         return "stop_loss"
 
-    # Volume fade
-    if rvol_value > 0 and rvol_value < config.MOMENTUM_VOL_FADE:
+    # Volume fade — but only after the trade has had time to develop.
+    # RVOL decays naturally within 30-60s of a spike entry; without
+    # this minimum hold, every momentum trade exits on the first
+    # post-spike tick with tiny P/L.
+    if (
+        held_seconds >= config.MOMENTUM_MIN_HOLD_SECONDS
+        and rvol_value > 0
+        and rvol_value < config.MOMENTUM_VOL_FADE
+    ):
         return "volume_fade"
 
     # Time stop
-    held_minutes = (ts - entry_time).total_seconds() / 60.0
+    held_minutes = held_seconds / 60.0
     if held_minutes >= config.MOMENTUM_MAX_HOLD:
         return "time_stop"
 
