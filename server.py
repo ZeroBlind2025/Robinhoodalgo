@@ -188,6 +188,61 @@ def create_app(scalper):
         _check_auth(authorization)
         return scalper.recent_trades()
 
+    @app.get("/bootstrap/pickle")
+    def bootstrap_pickle(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+        """
+        Return the live Robinhood session pickle as base64, so you can
+        persist it as RH_SESSION_PICKLE_B64 and skip the push challenge
+        on future deploys. Requires DASHBOARD_TOKEN auth.
+
+        Usage (from a browser or curl):
+            curl -H "Authorization: Bearer <DASHBOARD_TOKEN>" \\
+                 https://your-engine.up.railway.app/bootstrap/pickle
+
+        Response shape:
+            {
+              "ok": true,
+              "envVarName": "RH_SESSION_PICKLE_B64",
+              "envVarValue": "gASV...",
+              "bytes": 2048,
+              "instructions": "..."
+            }
+
+        If no pickle exists yet (login hasn't completed), returns 404.
+        """
+        from fastapi import HTTPException
+        import base64
+        from pathlib import Path
+
+        _check_auth(authorization)
+
+        pickle_path = Path.home() / ".tokens" / f"{config.PICKLE_NAME}.pickle"
+        if not pickle_path.exists():
+            raise HTTPException(
+                404,
+                "No session pickle yet. The engine hasn't completed a "
+                "successful Robinhood login. Check /health, confirm "
+                "RH_USERNAME and RH_PASSWORD are set, and watch for a "
+                "push notification on your phone.",
+            )
+        try:
+            data = pickle_path.read_bytes()
+        except OSError as exc:
+            raise HTTPException(500, f"Failed to read pickle: {exc}")
+
+        blob = base64.b64encode(data).decode("ascii")
+        return {
+            "ok": True,
+            "envVarName": "RH_SESSION_PICKLE_B64",
+            "envVarValue": blob,
+            "bytes": len(data),
+            "instructions": (
+                "Copy envVarValue into Railway as a new env var named "
+                "RH_SESSION_PICKLE_B64. Railway will auto-redeploy and "
+                "future startups will reuse the cached session."
+            ),
+        }
+
     # ------------------------------------------------------------------
     # Static dashboard mount (optional — only if the Vite build exists)
     # ------------------------------------------------------------------

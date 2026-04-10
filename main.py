@@ -61,19 +61,22 @@ class Scalper:
         signal.signal(signal.SIGTERM, self._handle_term)
         signal.signal(signal.SIGINT, self._handle_term)
 
-        if not auth.login():
-            log.error("Unable to login to Robinhood. Exiting.")
-            sys.exit(1)
-
-        self._seed_rvol_baseline()
-
-        # Start the dashboard-facing status server before entering the loop.
+        # Start the HTTP server FIRST so Railway's healthcheck passes
+        # immediately and the dashboard / bootstrap endpoints are
+        # reachable even while the Robinhood login is waiting on a
+        # push-notification challenge (which can block for ~60s).
         if config.ENABLE_SERVER:
             try:
                 import server
                 server.run_server_in_thread(self)
             except Exception as exc:  # noqa: BLE001
                 log.warning("Status server failed to start: %s", exc)
+
+        if not auth.login():
+            log.error("Unable to login to Robinhood. Exiting.")
+            sys.exit(1)
+
+        self._seed_rvol_baseline()
 
         log.info(
             "Scalper started (paper=%s, budget=$%.2f, tickers=%s)",

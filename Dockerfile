@@ -3,6 +3,19 @@
 # ---------------------------------------------------------------------
 FROM node:20-alpine AS dashboard-build
 
+# Pass dashboard config through as build args. Vite inlines any
+# VITE_* env var at build time, so these end up baked into the
+# compiled bundle. Pass them from Railway via the service's Build
+# Args setting (Settings -> Build -> Build Args), e.g.:
+#     VITE_API_TOKEN=<same value as DASHBOARD_TOKEN>
+#
+# If DASHBOARD_TOKEN is unset on the engine side, leave VITE_API_TOKEN
+# blank here too — the dashboard will make unauthenticated requests.
+ARG VITE_API_URL=""
+ARG VITE_API_TOKEN=""
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_API_TOKEN=$VITE_API_TOKEN
+
 WORKDIR /dashboard
 
 # Copy only package manifests first so Docker caches the npm install
