@@ -20,9 +20,18 @@ The refresh token inside the pickle stays valid until Robinhood expires
 it (typically days to weeks). When the engine eventually fails to
 authenticate, re-run this script and update the env var.
 
-USAGE
------
-    pip install -r requirements.txt
+USAGE (fully standalone — no repo clone required)
+---------------------------------------------------
+This script is intentionally self-contained. The only dependency is
+`robin-stocks` — you do NOT need the full requirements.txt with fastapi,
+numpy, pandas, etc.
+
+    # Option A: one-liner
+    pip install robin-stocks
+    python bootstrap_login.py
+
+    # Option B: use the minimal requirements file
+    pip install -r requirements-bootstrap.txt
     python bootstrap_login.py
 
 Follow the prompts. When the script says "approve on your phone", open
@@ -35,14 +44,21 @@ ENV VARS YOU'LL END UP SETTING ON RAILWAY
     RH_USERNAME=<your email>
     RH_PASSWORD=<your password>
     RH_SESSION_PICKLE_B64=<the blob below>
+
+Optional: override the pickle name with RH_PICKLE_NAME if you want to
+keep multiple sessions side-by-side. The default "railway_session" must
+match the RH_PICKLE_NAME env var on Railway (same default there).
 """
 
 import base64
 import getpass
+import os
 import sys
 from pathlib import Path
 
-import config
+# Standalone: no `config` import, so you can run this script without
+# cloning the whole repo. Just download this one file.
+PICKLE_NAME = os.environ.get("RH_PICKLE_NAME", "railway_session")
 
 
 def main() -> int:
@@ -84,7 +100,7 @@ def main() -> int:
             username=username,
             password=password,
             store_session=True,
-            pickle_name=config.PICKLE_NAME,
+            pickle_name=PICKLE_NAME,
         )
     except Exception as exc:  # noqa: BLE001
         print(f"\nLogin failed: {exc}", file=sys.stderr)
@@ -110,7 +126,7 @@ def main() -> int:
     equity = profile.get("equity", "?")
     print(f"\n[ok] Session established. Portfolio equity: ${equity}")
 
-    pickle_path = Path.home() / ".tokens" / f"{config.PICKLE_NAME}.pickle"
+    pickle_path = Path.home() / ".tokens" / f"{PICKLE_NAME}.pickle"
     if not pickle_path.exists():
         print(
             f"\nExpected pickle at {pickle_path} but it's missing. "

@@ -1,0 +1,13 @@
+# Minimal deps for running bootstrap_login.py locally.
+#
+# This is deliberately tiny — you don't need fastapi, numpy, pandas, etc
+# just to solve the Robinhood MFA challenge and grab a session pickle.
+#
+#    pip install -r requirements-bootstrap.txt
+#    python bootstrap_login.py
+#
+# Or if you'd rather avoid the file entirely:
+#    pip install robin-stocks
+#    python bootstrap_login.py
+
+robin-stocks>=3.0.0
