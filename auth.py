@@ -133,6 +133,46 @@ def _try_pickle_login() -> bool:
         return False
 
 
+def _print_pickle_blob() -> None:
+    """
+    Read the pickle off disk, base64-encode it, and print it to the
+    Railway logs with clear copy-paste instructions. Called once after
+    a successful fresh bootstrap login so the user can persist the
+    session as an env var and skip MFA on future boots.
+    """
+    path = _pickle_path()
+    if not path.exists():
+        log.warning("Expected pickle at %s but it's missing", path)
+        return
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        log.warning("Failed to read pickle at %s: %s", path, exc)
+        return
+
+    blob = base64.b64encode(data).decode("ascii")
+
+    banner = "=" * 72
+    log.warning("")
+    log.warning(banner)
+    log.warning("  LOGIN SUCCEEDED — SAVE THIS PICKLE TO RAILWAY")
+    log.warning(banner)
+    log.warning("  Copy the ENTIRE base64 blob below, then in Railway:")
+    log.warning("    Variables -> New Variable")
+    log.warning("    Name:  RH_SESSION_PICKLE_B64")
+    log.warning("    Value: <paste the blob>")
+    log.warning("  Railway will auto-redeploy and the engine will use")
+    log.warning("  the cached session from now on. You won't need to")
+    log.warning("  approve another push notification until the refresh")
+    log.warning("  token eventually expires (typically days to weeks).")
+    log.warning(banner)
+    log.warning("")
+    log.warning("RH_SESSION_PICKLE_B64=%s", blob)
+    log.warning("")
+    log.warning(banner)
+    log.warning("")
+
+
 def login(max_retries: int = 4) -> bool:
     """
     Establish a Robinhood session. Returns True on success.
@@ -141,8 +181,14 @@ def login(max_retries: int = 4) -> bool:
       1. In paper mode with no creds → skip entirely.
       2. Restore any base64 pickle from the env var to disk.
       3. Try TOTP if a secret is set (legacy).
-      4. Fall back to pickle-based login.
-      5. On failure, emit a loud instruction to re-run bootstrap_login.py.
+      4. Fall back to a fresh rh.login() — which will trigger a
+         Robinhood push notification to the user's phone and poll
+         until they approve. This is how the first-time bootstrap
+         works directly on Railway without needing a local machine.
+      5. On the first successful fresh login (no prior pickle), emit
+         the base64 pickle blob to the logs so the user can persist
+         it as an env var.
+      6. On failure, emit a loud instruction.
     """
     if config.PAPER_MODE and not (config.RH_USERNAME and config.RH_PASSWORD):
         log.info("PAPER_MODE with no credentials; skipping Robinhood login")
@@ -154,7 +200,25 @@ def login(max_retries: int = 4) -> bool:
 
     # Write the base64-encoded pickle to disk if one was provided.
     restored = _restore_pickle_from_env()
-    pickle_present = restored or _pickle_path().exists()
+    pickle_path_existed = _pickle_path().exists()
+    pickle_present = restored or pickle_path_existed
+    is_fresh_bootstrap = not pickle_present
+
+    if is_fresh_bootstrap:
+        banner = "=" * 72
+        log.warning("")
+        log.warning(banner)
+        log.warning("  FIRST-TIME BOOTSTRAP — no session pickle found")
+        log.warning(banner)
+        log.warning("  About to call rh.login() which will trigger a")
+        log.warning("  Robinhood push notification to your phone.")
+        log.warning("")
+        log.warning("  >>> OPEN THE ROBINHOOD APP AND TAP 'APPROVE' <<<")
+        log.warning("")
+        log.warning("  robin_stocks will poll for approval for about 60s.")
+        log.warning("  If you miss the window, redeploy to retry.")
+        log.warning(banner)
+        log.warning("")
 
     backoff = 2
     for attempt in range(1, max_retries + 1):
@@ -166,24 +230,28 @@ def login(max_retries: int = 4) -> bool:
 
         if _try_pickle_login():
             log.info("Robinhood session active via pickled tokens")
+            if is_fresh_bootstrap:
+                _print_pickle_blob()
             return True
 
         if attempt < max_retries:
             time.sleep(backoff)
             backoff *= 2
 
-    if not pickle_present:
+    if is_fresh_bootstrap:
         log.error(
-            "No session pickle found and no working credentials. "
-            "Run `python bootstrap_login.py` on a machine where you can "
-            "approve the Robinhood push notification, then copy the "
-            "resulting %s value into Railway.", SESSION_ENV,
+            "Fresh bootstrap login failed. Make sure RH_USERNAME and "
+            "RH_PASSWORD are correct, then redeploy to retry. If you "
+            "approved the push too late, robin_stocks times out after "
+            "~60s and a redeploy will trigger a new push."
         )
     else:
         log.error(
             "Login failed — the session pickle has likely expired. "
-            "Re-run `python bootstrap_login.py` locally and update %s "
-            "in Railway.", SESSION_ENV,
+            "Delete the RH_SESSION_PICKLE_B64 env var in Railway and "
+            "redeploy; the engine will trigger a fresh bootstrap push "
+            "on next start, and log the new pickle blob for you to "
+            "paste back into the env var."
         )
     return False
 
