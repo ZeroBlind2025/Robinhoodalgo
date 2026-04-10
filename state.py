@@ -2,9 +2,10 @@
 Per-ticker state and open-position bookkeeping.
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Deque, Dict, List, Optional
 
 from data import BarBuilder
 from indicators import RVolBaseline
@@ -50,6 +51,11 @@ class TickerState:
     last_price_time: Optional[datetime] = None
     last_bar_used_for_vwap: Optional[datetime] = None
     position: Optional[OpenPosition] = None
+    last_quote: Dict = field(default_factory=dict)
+    previous_close: float = 0.0
+    # Rolling buffer of recent closes for the dashboard priceHistory view
+    price_trail: Deque[float] = field(default_factory=lambda: deque(maxlen=50))
+    vwap_trail: Deque[float] = field(default_factory=lambda: deque(maxlen=50))
 
     def update_vwap_from_new_bars(self) -> None:
         """Feed any closed bars the VWAP hasn't seen yet."""
@@ -60,11 +66,21 @@ class TickerState:
             ):
                 self.vwap.update(bar.high, bar.low, bar.close, bar.volume)
                 self.last_bar_used_for_vwap = bar.timestamp
+                self.price_trail.append(bar.close)
+                self.vwap_trail.append(self.vwap.vwap)
+
+    @property
+    def day_change_pct(self) -> float:
+        if self.previous_close <= 0 or self.last_price <= 0:
+            return 0.0
+        return (self.last_price - self.previous_close) / self.previous_close * 100.0
 
     def reset_day(self) -> None:
         self.bars.reset()
         self.vwap.reset()
         self.last_bar_used_for_vwap = None
+        self.price_trail.clear()
+        self.vwap_trail.clear()
 
 
 @dataclass

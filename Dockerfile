@@ -11,4 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Railway injects PORT at runtime; the status server reads config.SERVER_PORT
+# which falls back to PORT or 8000.
+EXPOSE 8000
+
 CMD ["python", "main.py"]

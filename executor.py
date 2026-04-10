@@ -48,45 +48,21 @@ class Executor(Protocol):
 
 
 class LiveExecutor:
+    """
+    Robinhood order execution using FRACTIONAL shares.
+
+    Robinhood restricts fractional orders to market orders — there is no
+    fractional limit-order API. At $12.50 per trade on CRWV/NBIS/SMCI
+    (20M+ daily volume), slippage from a market order is a handful of
+    cents, well below the strategy's 0.3-0.8% targets, so we accept that
+    tradeoff in exchange for fractional share sizing.
+
+    buy_limit / sell_limit are therefore aliased to the market path so
+    the strategy layer doesn't have to care.
+    """
+
     def __init__(self):
         self._open_order_ids: List[str] = []
-
-    # -- order placement --------------------------------------------------
-
-    def _place_limit(self, side: str, ticker: str, qty: float, price: float) -> Optional[Fill]:
-        rh = _robin_stocks()
-        try:
-            fn = (
-                rh.orders.order_buy_limit
-                if side == "buy"
-                else rh.orders.order_sell_limit
-            )
-            result = fn(
-                symbol=ticker,
-                quantity=qty,
-                limitPrice=round(price, 2),
-                timeInForce="gfd",
-                extendedHours=False,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error("%s_limit %s failed: %s", side, ticker, exc)
-            return None
-
-        if not result or "id" not in result:
-            log.warning("%s_limit %s got no order id: %s", side, ticker, result)
-            return None
-
-        order_id = result["id"]
-        self._open_order_ids.append(order_id)
-        filled = self._wait_for_fill(order_id, timeout=config.ORDER_TIMEOUT)
-        if not filled:
-            log.info("Order %s not filled within %ds, cancelling", order_id, config.ORDER_TIMEOUT)
-            try:
-                rh.orders.cancel_stock_order(order_id)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("cancel_stock_order %s failed: %s", order_id, exc)
-            return None
-        return filled
 
     def _wait_for_fill(self, order_id: str, timeout: int) -> Optional[Fill]:
         rh = _robin_stocks()
@@ -122,39 +98,63 @@ class LiveExecutor:
         return None
 
     def buy_limit(self, ticker: str, qty: float, price: float) -> Optional[Fill]:
-        return self._place_limit("buy", ticker, qty, price)
+        # Fractional shares don't support limit orders on Robinhood.
+        return self._place_fractional("buy", ticker, qty)
 
     def sell_limit(self, ticker: str, qty: float, price: float) -> Optional[Fill]:
-        return self._place_limit("sell", ticker, qty, price)
+        return self._place_fractional("sell", ticker, qty)
 
-    def _place_market(self, side: str, ticker: str, qty: float) -> Optional[Fill]:
+    def _place_fractional(self, side: str, ticker: str, qty: float) -> Optional[Fill]:
+        """
+        Place a fractional-share market order via
+        `order_buy_fractional_by_quantity` / `order_sell_fractional_by_quantity`.
+        """
+        if qty <= 0:
+            return None
+
         rh = _robin_stocks()
+        # Round to 6dp — Robinhood's fractional precision
+        q = round(float(qty), 6)
+
         try:
-            fn = (
-                rh.orders.order_buy_market
-                if side == "buy"
-                else rh.orders.order_sell_market
-            )
-            result = fn(
-                symbol=ticker,
-                quantity=qty,
-                timeInForce="gfd",
-                extendedHours=False,
-            )
+            if side == "buy":
+                result = rh.orders.order_buy_fractional_by_quantity(
+                    symbol=ticker,
+                    quantity=q,
+                    timeInForce="gfd",
+                    extendedHours=False,
+                )
+            else:
+                result = rh.orders.order_sell_fractional_by_quantity(
+                    symbol=ticker,
+                    quantity=q,
+                    timeInForce="gfd",
+                    extendedHours=False,
+                )
         except Exception as exc:  # noqa: BLE001
-            log.error("%s_market %s failed: %s", side, ticker, exc)
+            log.error("fractional %s %s qty=%s failed: %s", side, ticker, q, exc)
             return None
+
         if not result or "id" not in result:
+            log.warning("fractional %s %s got no order id: %s", side, ticker, result)
             return None
+
         order_id = result["id"]
+        self._open_order_ids.append(order_id)
         filled = self._wait_for_fill(order_id, timeout=max(config.ORDER_TIMEOUT, 60))
+        if not filled:
+            # Market orders should always fill; if not, try to cancel and move on
+            try:
+                rh.orders.cancel_stock_order(order_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cancel_stock_order %s failed: %s", order_id, exc)
         return filled
 
     def buy_market(self, ticker: str, qty: float) -> Optional[Fill]:
-        return self._place_market("buy", ticker, qty)
+        return self._place_fractional("buy", ticker, qty)
 
     def sell_market(self, ticker: str, qty: float) -> Optional[Fill]:
-        return self._place_market("sell", ticker, qty)
+        return self._place_fractional("sell", ticker, qty)
 
     # -- maintenance ------------------------------------------------------
 

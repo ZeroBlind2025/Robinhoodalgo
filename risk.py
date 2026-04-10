@@ -3,6 +3,7 @@ Risk management: position sizing, PDT tracker, daily limits (Section 6).
 """
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -62,26 +63,45 @@ def compute_position_size(
     account_value: float,
     entry_price: float,
     stop_pct: float,
-) -> int:
+) -> float:
     """
-    Returns whole-share quantity. Uses RISK_PER_TRADE to compute the max
-    dollar loss, then sizes the position so the distance to stop equals that.
+    Fractional share sizing.
+
+    With a $500 budget and 3 tickers at $30–$135, whole-share sizing
+    would blow through the exposure cap on a single share. We use
+    Robinhood's fractional share support instead.
+
+    Rule (matches the dashboard's lotSize):
+        qty = min(
+            BUDGET * MAX_EXPOSURE_PCT / price,   # dollar-exposure cap
+            BUDGET * RISK_PER_TRADE / (price * stop_pct),  # risk cap
+        )
+
+    The effective sizing basis is min(account_value, BUDGET) so we never
+    size above what's actually in the Robinhood account (e.g. after losses
+    or if the broker balance is less than configured budget).
+
+    Returns a float quantity rounded to 6 decimal places (Robinhood's
+    fractional precision). Returns 0.0 if the resulting notional would be
+    below MIN_NOTIONAL.
     """
     if account_value <= 0 or entry_price <= 0 or stop_pct <= 0:
-        return 0
-    max_loss = config.RISK_PER_TRADE * account_value
+        return 0.0
+
+    basis = min(account_value, config.BUDGET)
+    max_exposure = basis * config.MAX_EXPOSURE_PCT
+    max_loss = basis * config.RISK_PER_TRADE
     per_share_risk = entry_price * stop_pct
-    if per_share_risk <= 0:
-        return 0
-    raw = max_loss / per_share_risk
 
-    # Also cap by dollar exposure — never put more than (1/MAX_CONCURRENT) of
-    # the account in a single trade.
-    dollar_cap = account_value / max(config.MAX_CONCURRENT, 1)
-    share_cap = dollar_cap / entry_price
+    qty_by_exposure = max_exposure / entry_price
+    qty_by_risk = (max_loss / per_share_risk) if per_share_risk > 0 else qty_by_exposure
 
-    qty = int(min(raw, share_cap))
-    return max(qty, 0)
+    qty = min(qty_by_exposure, qty_by_risk)
+    qty = math.floor(qty * 1_000_000) / 1_000_000  # 6dp truncation
+
+    if qty * entry_price < config.MIN_NOTIONAL:
+        return 0.0
+    return max(qty, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -202,5 +222,5 @@ class RiskManager:
             return False
         return True
 
-    def size(self, account_value: float, entry_price: float, stop_pct: float) -> int:
+    def size(self, account_value: float, entry_price: float, stop_pct: float) -> float:
         return compute_position_size(account_value, entry_price, stop_pct)

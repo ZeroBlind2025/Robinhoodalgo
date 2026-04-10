@@ -13,8 +13,9 @@ Drives:
 import signal
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Deque, Dict, List, Optional
 
 import auth
 import clock
@@ -47,6 +48,10 @@ class Scalper:
         self.trade_log = TradeLogger()
         self.running = True
         self._current_day: Optional[str] = None
+        # In-memory trade memo for the dashboard (last 200 events).
+        self.trades_memo: Deque[Dict] = deque(maxlen=200)
+        self.win_count: int = 0
+        self._last_account_value: float = 0.0
 
     # ------------------------------------------------------------------
     # startup
@@ -61,9 +66,18 @@ class Scalper:
             sys.exit(1)
 
         self._seed_rvol_baseline()
+
+        # Start the dashboard-facing status server before entering the loop.
+        if config.ENABLE_SERVER:
+            try:
+                import server
+                server.run_server_in_thread(self)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Status server failed to start: %s", exc)
+
         log.info(
-            "Scalper started (paper=%s, tickers=%s)",
-            config.PAPER_MODE, config.TICKERS,
+            "Scalper started (paper=%s, budget=$%.2f, tickers=%s)",
+            config.PAPER_MODE, config.BUDGET, config.TICKERS,
         )
         self.loop()
 
@@ -197,6 +211,9 @@ class Scalper:
         vol = quote.get("volume", 0)
         ts_state.last_price = price
         ts_state.last_price_time = now
+        ts_state.last_quote = quote
+        if quote.get("previous_close"):
+            ts_state.previous_close = quote["previous_close"]
 
         if isinstance(self.executor, PaperExecutor):
             self.executor.set_mark(ticker, price)
@@ -292,6 +309,17 @@ class Scalper:
             "rsi": signal.rsi,
             "rvol": signal.rvol,
         })
+        self.trades_memo.append({
+            "time": now.strftime("%H:%M"),
+            "symbol": ts_state.ticker,
+            "side": "BUY",
+            "shares": fill.quantity,
+            "price": fill.price,
+            "pnl": None,
+            "strategy": "VWAP" if signal.strategy == "vwap_reversion" else "MOM",
+            "holdMins": 0,
+            "closed": False,
+        })
 
     def _evaluate_exit(self, ts_state: TickerState, quote: Dict) -> None:
         pos = ts_state.position
@@ -363,7 +391,11 @@ class Scalper:
         self.risk.record_close(pnl)
         self.risk.pdt.record_day_trade()
         self.risk.save()
+        if pnl > 0:
+            self.win_count += 1
 
+        now_exit = clock.now_et()
+        hold_mins = max(1, int((now_exit - pos.entry_time).total_seconds() / 60))
         self.trade_log.record("exit", {
             "ticker": ts_state.ticker,
             "strategy": pos.strategy,
@@ -372,7 +404,20 @@ class Scalper:
             "exit": fill.price,
             "pnl": pnl,
             "reason": reason,
-            "hold_seconds": (clock.now_et() - pos.entry_time).total_seconds(),
+            "hold_seconds": (now_exit - pos.entry_time).total_seconds(),
+        })
+        self.trades_memo.append({
+            "time": now_exit.strftime("%H:%M"),
+            "symbol": ts_state.ticker,
+            "side": "SELL",
+            "shares": fill.quantity,
+            "price": fill.price,
+            "entry": pos.entry_price,
+            "pnl": pnl,
+            "strategy": "VWAP" if pos.strategy == "vwap_reversion" else "MOM",
+            "holdMins": hold_mins,
+            "closed": True,
+            "reason": reason,
         })
         ts_state.position = None
 
@@ -387,9 +432,15 @@ class Scalper:
         if isinstance(self.executor, PaperExecutor):
             for ticker, q in quotes.items():
                 self.executor.set_mark(ticker, q["price"])
-            return self.executor.get_account_value()
-        val = self.executor.get_account_value()
-        return val or 0.0
+            val = self.executor.get_account_value()
+        else:
+            val = self.executor.get_account_value() or 0.0
+        self._last_account_value = val
+        return val
+
+    def recent_trades(self) -> List[Dict]:
+        """Return a copy of the trade memo for the HTTP server."""
+        return list(self.trades_memo)
 
 
 def main() -> None:

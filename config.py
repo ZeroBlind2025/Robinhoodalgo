@@ -70,7 +70,17 @@ ROC_PERIOD = _env_int("ROC_PERIOD", 5)
 # Risk (Section 11.3)
 # ---------------------------------------------------------------------------
 
-RISK_PER_TRADE = _env_float("RISK_PER_TRADE", 0.005)   # 0.5%
+# Budget is the capital allocated to this strategy. It acts as the upper
+# bound on sizing even if the Robinhood account holds more cash. Starting
+# live capital is small ($500) so we MUST use fractional shares.
+BUDGET = _env_float("BUDGET", 500.0)
+# Max dollar exposure per trade as a fraction of BUDGET.
+MAX_EXPOSURE_PCT = _env_float("MAX_EXPOSURE_PCT", 0.025)   # 2.5% -> $12.50
+# Minimum notional per order. Robinhood enforces a $1 floor on fractional
+# orders; we keep a slightly higher cushion to avoid edge rejections.
+MIN_NOTIONAL = _env_float("MIN_NOTIONAL", 1.00)
+
+RISK_PER_TRADE = _env_float("RISK_PER_TRADE", 0.005)   # 0.5% dollar-risk
 MAX_DAILY_LOSS = _env_float("MAX_DAILY_LOSS", 0.02)    # 2.0%
 MAX_DAILY_TRADES = _env_int("MAX_DAILY_TRADES", 20)
 MAX_CONCURRENT = _env_int("MAX_CONCURRENT", 2)
@@ -108,11 +118,11 @@ ACCOUNT_CHECK_INTERVAL = _env_int("ACCOUNT_CHECK_INTERVAL", 300)
 # ---------------------------------------------------------------------------
 
 PAPER_MODE = _env_bool("PAPER_MODE", True)
-PAPER_STARTING_CASH = _env_float("PAPER_STARTING_CASH", 25000.0)
+PAPER_STARTING_CASH = _env_float("PAPER_STARTING_CASH", 500.0)
 
 RH_USERNAME = _env_str("RH_USERNAME", "")
 RH_PASSWORD = _env_str("RH_PASSWORD", "")
-RH_MFA_SECRET = _env_str("RH_MFA_SECRET", "")
+RH_MFA_SECRET = _env_str("RH_MFA_SECRET", "")       # legacy, usually unused now
 
 PICKLE_NAME = _env_str("RH_PICKLE_NAME", "railway_session")
 
@@ -123,3 +133,14 @@ RVOL_BASELINE_PATH = _env_str("RVOL_BASELINE_PATH", "rvol_baseline.json")
 
 # Number of days of history used to build the RVOL baseline
 RVOL_BASELINE_DAYS = _env_int("RVOL_BASELINE_DAYS", 15)
+
+# ---------------------------------------------------------------------------
+# HTTP status server (dashboard backend)
+# ---------------------------------------------------------------------------
+
+SERVER_HOST = _env_str("SERVER_HOST", "0.0.0.0")
+# Railway injects PORT; fall back to 8000 for local runs
+SERVER_PORT = _env_int("PORT", _env_int("SERVER_PORT", 8000))
+DASHBOARD_TOKEN = _env_str("DASHBOARD_TOKEN", "")
+DASHBOARD_ORIGIN = _env_str("DASHBOARD_ORIGIN", "*")
+ENABLE_SERVER = _env_bool("ENABLE_SERVER", True)
