@@ -193,46 +193,45 @@ def create_app(scalper):
         """
         Return the live Robinhood session pickle as base64, so you can
         persist it as RH_SESSION_PICKLE_B64 and skip the push challenge
-        on future deploys. Requires DASHBOARD_TOKEN auth.
+        on future deploys. Requires DASHBOARD_TOKEN auth (if set).
 
-        Usage (from a browser or curl):
+        Usage:
             curl -H "Authorization: Bearer <DASHBOARD_TOKEN>" \\
                  https://your-engine.up.railway.app/bootstrap/pickle
 
-        Response shape:
-            {
-              "ok": true,
-              "envVarName": "RH_SESSION_PICKLE_B64",
-              "envVarValue": "gASV...",
-              "bytes": 2048,
-              "instructions": "..."
-            }
-
-        If no pickle exists yet (login hasn't completed), returns 404.
+        If no pickle exists yet (login hasn't completed), returns 404
+        with guidance. If robin_stocks didn't write a pickle to disk
+        despite a successful login, this endpoint will manually
+        construct one from the library's module state.
         """
         from fastapi import HTTPException
         import base64
-        from pathlib import Path
+        import auth
 
         _check_auth(authorization)
 
-        pickle_path = Path.home() / ".tokens" / f"{config.PICKLE_NAME}.pickle"
-        if not pickle_path.exists():
+        path = auth._find_pickle()
+        if path is None:
+            # Try manual save as a fallback.
+            path = auth._try_manual_pickle_save()
+
+        if path is None or not path.exists():
             raise HTTPException(
                 404,
-                "No session pickle yet. The engine hasn't completed a "
-                "successful Robinhood login. Check /health, confirm "
-                "RH_USERNAME and RH_PASSWORD are set, and watch for a "
-                "push notification on your phone.",
+                "No session pickle found on disk. The engine may not "
+                "have completed a successful Robinhood login yet, or "
+                "robin_stocks stored the session in-memory only. "
+                "Hit /bootstrap/debug for filesystem details.",
             )
         try:
-            data = pickle_path.read_bytes()
+            data = path.read_bytes()
         except OSError as exc:
             raise HTTPException(500, f"Failed to read pickle: {exc}")
 
         blob = base64.b64encode(data).decode("ascii")
         return {
             "ok": True,
+            "picklePath": str(path),
             "envVarName": "RH_SESSION_PICKLE_B64",
             "envVarValue": blob,
             "bytes": len(data),
@@ -242,6 +241,17 @@ def create_app(scalper):
                 "future startups will reuse the cached session."
             ),
         }
+
+    @app.get("/bootstrap/debug")
+    def bootstrap_debug(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+        """
+        Debug helper: dump filesystem + robin_stocks module state so we
+        can see where (or whether) the session pickle got written.
+        Requires DASHBOARD_TOKEN auth (if set).
+        """
+        import auth
+        _check_auth(authorization)
+        return auth.debug_token_state()
 
     # ------------------------------------------------------------------
     # Static dashboard mount (optional — only if the Vite build exists)
