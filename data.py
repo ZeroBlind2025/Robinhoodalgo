@@ -47,6 +47,20 @@ def get_quote_data(ticker: str) -> Optional[Dict]:
             return None
         q = raw[0]
         prev_close = q.get("adjusted_previous_close") or q.get("previous_close") or 0
+
+        # Robinhood's /quotes/ endpoint does NOT include a volume field.
+        # Without it, the bar builder feeds 0-volume deltas to the VWAP
+        # engine (which skips updates on volume<=0), and RVOL stays at
+        # zero forever. We pull the session cumulative volume from
+        # /fundamentals/ which is updated live during market hours.
+        vol = 0
+        try:
+            fund = rh.stocks.get_fundamentals(ticker)
+            if fund and fund[0]:
+                vol = int(float(fund[0].get("volume", 0) or 0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_fundamentals(%s) failed: %s", ticker, exc)
+
         return {
             "ticker": ticker,
             "price": float(q["last_trade_price"]),
@@ -54,7 +68,7 @@ def get_quote_data(ticker: str) -> Optional[Dict]:
             "ask": float(q["ask_price"]),
             "bid_size": int(float(q.get("bid_size") or 0)),
             "ask_size": int(float(q.get("ask_size") or 0)),
-            "volume": int(float(q.get("volume", 0) or 0)),
+            "volume": vol,
             "previous_close": float(prev_close or 0),
         }
     except Exception as exc:  # noqa: BLE001
