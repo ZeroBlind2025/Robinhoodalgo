@@ -132,9 +132,17 @@ class Scalper:
         if self._current_day != today:
             self._start_new_day(now, today)
 
-        # Outside market hours → idle
-        if not clock.is_market_open(now):
-            time.sleep(30)
+        is_open = clock.is_market_open(now)
+
+        # When market is closed, poll quotes at a slow cadence so the
+        # dashboard can show real pre/post-market prices instead of
+        # staring at $0.00. Trading logic still gates on is_open below.
+        if not is_open:
+            self._poll_quotes_only(now)
+            # account value once per slow cycle so the dashboard stats
+            # show a real number even when the market is closed
+            self._last_account_value = self._account_value({}) or self._last_account_value
+            time.sleep(60)
             return
 
         # Ensure authenticated session is still alive.
@@ -190,6 +198,28 @@ class Scalper:
             self._evaluate_entry(ts_state, quotes[ticker], account_value, now)
             if not self.risk.can_open_new_position(account_value, self.state.count_open()):
                 break
+
+    def _poll_quotes_only(self, now: datetime) -> None:
+        """
+        Lightweight quote poll used when the market is closed. Fetches
+        one snapshot per ticker and stuffs it into state so the
+        dashboard shows pre/post-market prices. Does NOT build bars,
+        update VWAP, or evaluate strategy signals.
+        """
+        if config.PAPER_MODE and not (config.RH_USERNAME and config.RH_PASSWORD):
+            return
+        for ticker in config.TICKERS:
+            q = get_quote_data(ticker)
+            if q is None:
+                continue
+            ts_state = self.state.get(ticker)
+            ts_state.last_price = q["price"]
+            ts_state.last_price_time = now
+            ts_state.last_quote = q
+            if q.get("previous_close"):
+                ts_state.previous_close = q["previous_close"]
+            if isinstance(self.executor, PaperExecutor):
+                self.executor.set_mark(ticker, q["price"])
 
     # ------------------------------------------------------------------
     # daily lifecycle
