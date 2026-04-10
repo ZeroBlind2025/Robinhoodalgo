@@ -76,6 +76,12 @@ MAX_DAILY_TRADES = _env_int("MAX_DAILY_TRADES", 20)
 MAX_CONCURRENT = _env_int("MAX_CONCURRENT", 2)
 MAX_SECTOR_EXPOSURE = _env_int("MAX_SECTOR_EXPOSURE", 2)
 
+# Account type: "cash" or "margin". PDT (FINRA Rule 4210) only applies to
+# margin accounts — cash accounts can day trade freely, bounded only by
+# settled-cash availability (T+1). Set ACCOUNT_TYPE=cash to bypass the
+# PDT tracker entirely.
+ACCOUNT_TYPE = _env_str("ACCOUNT_TYPE", "cash").strip().lower()
+
 # Times are Eastern Time, 24-hour
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 30

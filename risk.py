@@ -24,6 +24,11 @@ class PDTTracker:
     day_trades: List[datetime] = field(default_factory=list)
 
     def can_trade(self, account_value: float) -> bool:
+        # PDT (FINRA Rule 4210) only applies to margin accounts. Cash
+        # accounts can day trade without limit — they're bounded by T+1
+        # settlement instead, not by trade count.
+        if config.ACCOUNT_TYPE == "cash":
+            return True
         if account_value >= 25000:
             return True
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
